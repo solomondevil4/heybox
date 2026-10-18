@@ -86,6 +86,18 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
+      # 通过 QQ 邮箱 SMTP 推送结果（成功 / 失败都发）
+      # 不想要这个功能：删掉本步骤 + secrets 里的 QQ_EMAIL / QQ_SMTP_AUTH_CODE
+      - name: QQ 邮箱通知
+        if: always()
+        continue-on-error: true
+        env:
+          QQ_USER: ${{ secrets.QQ_EMAIL }}
+          QQ_PASS: ${{ secrets.QQ_SMTP_AUTH_CODE }}
+          JOB_STATUS: ${{ job.status }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: python3 .github/scripts/notify_qq.py
+
       # 把每天的结果追加到一个固定 Issue，触发 GitHub 通知（邮件 / App 推送）
       # 不想要这个功能：删掉本步骤 + 顶部 permissions 里的 issues: write
       - name: 写入日报 Issue（触发通知）
