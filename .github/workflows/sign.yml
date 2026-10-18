@@ -40,8 +40,10 @@ jobs:
             npm install
           fi
 
-      # 没配 secret 时脚本会「成功」但什么都没做，这里直接拦下来
-      - name: 检查 Cookie 是否配置
+      # 1) 没配 secret 时脚本会「成功」但什么都没做，这里直接拦下来
+      # 2) 多账号格式校验：每个账号必须同时包含 pkey= 和 x_xhh_tokenid=
+      #    换行或 & 分隔均可，缺字段时明确指出是第几个账号
+      - name: 检查 Cookie 是否配置且格式完整
         env:
           heybox_ck: ${{ secrets.HEYBOX_CK }}
         run: |
@@ -50,15 +52,56 @@ jobs:
             exit 1
           fi
 
+          normalized=$(printf '%s' "$heybox_ck" | tr '&' '\n')
+          total=0
+          bad=0
+          while IFS= read -r raw; do
+            acc=$(printf '%s' "$raw" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+            if [ -z "$acc" ]; then
+              continue
+            fi
+            total=$((total + 1))
+            has_pkey=0
+            has_token=0
+            case "$acc" in
+              *pkey=*) has_pkey=1 ;;
+            esac
+            case "$acc" in
+              *x_xhh_tokenid=*) has_token=1 ;;
+            esac
+            if [ "$has_pkey" -ne 1 ] || [ "$has_token" -ne 1 ]; then
+              bad=$((bad + 1))
+              echo "::error::第 ${total} 个账号格式不完整：需要同时包含 pkey= 和 x_xhh_tokenid=，请检查 secret heybox_ck"
+            fi
+          done <<< "$normalized"
+
+          echo "检测到 ${total} 个账号，格式错误 ${bad} 个"
+          if [ "$total" -eq 0 ] || [ "$bad" -gt 0 ]; then
+            exit 1
+          fi
+
       # heybox_sign.js 同时完成：签到 / 分享任意帖子 / 分享游戏详情 / 分享游戏评价
       # 并输出「当前总H币」和「任务汇总」
-      - name: 执行每日任务
+      #
+      # 输出先落到 sign.raw，再脱敏成 sign.log 打印出来。
+      # 这样公开仓库的 Actions 日志、Artifact、邮件、Issue 里都不会出现
+      # 黑盒ID / IMEI（IMEI 是 pkey 的 md5 前 16 位，属于凭证派生值）。
+      - name: 执行每日任务（输出已脱敏）
         id: attendance
         env:
           heybox_ck: ${{ secrets.HEYBOX_CK }}
         run: |
-          set -o pipefail
-          node heybox_sign.js 2>&1 | tee sign.log
+          rc=0
+          node heybox_sign.js > sign.raw 2>&1 || rc=$?
+          sed -E \
+            -e 's/账号\[([0-9]+)\]\[[0-9]+\]/账号[\1]/g' \
+            -e 's/(黑盒ID=)[0-9]+/\1***/g' \
+            -e 's/(IMEI=)[0-9a-fA-F]+/\1***/g' \
+            -e 's/(heybox_id=)[0-9]+/\1***/g' \
+            sign.raw > sign.log
+          cat sign.log
+          rm -f sign.raw
+          exit $rc
 
       - name: 写入运行摘要
         if: always()

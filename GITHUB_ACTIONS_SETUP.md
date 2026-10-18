@@ -146,3 +146,90 @@ GitHub 只对「失败」的运行默认发邮件，成功不会打扰你。两�
 3. **Cookie 会过期**。表现为日志里 `请登录` / 登录态失效，重新抓一次 Cookie 更新 Secret 即可。
 4. **公开仓库的可见性**。仓库是 public，那么 Actions 日志、Summary、那个 Issue 全部公开。脚本自身做了打码（`pkey` / `x_xhh_tokenid` / `hkey` / `nonce`），但**昵称和 H 币数量是明文**，介意就把仓库改私有（私有仓库不受 60 天规则限制，2000 分钟/月免费额度足够）。
 5. **合规风险**。伪造设备指纹、伪造分享与浏览行为刷任务，违反平台用户协议，账号被风控或封禁是合理预期。自己决定是否承担。
+
+---
+
+## 六、安全检查（四项）
+
+上游 README 的安全提示，在这里逐条落实并给出自查方法。
+
+### 1. 不要把真实 Cookie 写进 README / Issue / 日志截图 / 公开仓库
+
+**已做的防护：**
+
+- 凭证只存在于 GitHub Secret（`HEYBOX_CK`），仓库里的示例一律是占位符 `pkey=xxx;x_xhh_tokenid=xxx;`
+- 脚本自带的 `tools.mask()` 会把日志里的 `pkey=` / `x_xhh_tokenid=` / `hkey=` / `nonce=` 全部替换成 `<redacted>`
+- 工作流额外做了一层输出脱敏：`heybox_sign.js` 的输出先落到 `sign.raw`，再用 `sed` 把 **黑盒ID / IMEI / heybox_id** 换成 `***` 后写入 `sign.log`；`sign.raw` 打印完立即删除，且**不会**被上传
+  - 这一点很重要：`IMEI` 不是真 IMEI，而是 `md5(pkey)` 的前 16 位，属于凭证派生值，不适合出现在公开日志里
+- Actions 日志、运行摘要、Artifact、QQ 邮件、日报 Issue 用的都是脱敏后的 `sign.log`
+
+**自查方法（本地仓库里执行）：**
+
+```bash
+# 工作区里有没有真实凭证（应无输出）
+git grep -n -I -E 'MTc5Mj|fawlnpk|x_xhh_tokenid=[A-Za-z0-9]'
+
+# 任意历史提交里有没有出现过（应无输出）
+git log --all --oneline -S'pkey=MTc5'
+```
+
+公开日志的检查方法是直接下载运行日志，搜 `pkey=` / 黑盒ID，应当只看到 `<redacted>` 和 `***`。
+
+### 2. 不要把 heybox_ck 提交到 Git
+
+`.gitignore` 已覆盖：
+
+```text
+node_modules/
+sign.log
+.env
+.data/
+```
+
+检查被跟踪文件里有没有意外混入：
+
+```bash
+git ls-files | grep -E '\.env|sign\.log|\.data'   # 应无输出
+```
+
+另外 `.github/scripts/notify_qq.py` 从 `os.environ` 读授权码，工作流里用 `${{ secrets.QQ_SMTP_AUTH_CODE }}` 传入，**代码里没有任何硬编码密码**。
+
+### 3. Cookie 失效后重新抓取
+
+**失效信号（两条，都不需要你盯着）：**
+
+1. workflow 变红（脚本返回退出码 1）
+2. QQ 邮件主题变成「有任务未完成」，或日报 Issue 里出现 `请登录` / `登录态失效`
+
+**重新抓取**：App 端 `pkey` 存放在 `/data/data/com.max.xiaoheihe/shared_prefs/user.xml`，`x_xhh_tokenid` 在 `/data/data/com.max.xiaoheihe/cache/hblog/content/net/log`，模拟器有 root 时用 `adb root` 直接读即可，不需要抓包和装证书。
+
+拿到新值后更新 Secret 就行，工作流不用改。
+
+**什么会立刻让 pkey 失效**：在 App 里点「退出登录」、改密码。**什么不会**：卸载/关闭模拟器、换网络、长时间不跑。
+
+### 4. 多账号运行时确认格式完整
+
+工作流第一步 `检查 Cookie 是否配置且格式完整` 会做校验，规则与脚本一致（`src/core/tools.js` 的 `splitEnv` 按 `&` 或换行切分）：
+
+- 每个账号必须**同时**包含 `pkey=` 和 `x_xhh_tokenid=`
+- 缺字段会直接报错，并指出是第几个账号：
+
+```
+::error::第 2 个账号格式不完整：需要同时包含 pkey= 和 x_xhh_tokenid=
+```
+
+- 空值、只有 `pkey`、只有 token 都会在跑任务之前被拦下，不会出现「看起来成功但什么都没做」
+
+**两种合法写法**（二选一）：
+
+```text
+pkey=A;x_xhh_tokenid=A;
+pkey=B;x_xhh_tokenid=B;
+```
+
+```text
+pkey=A;x_xhh_tokenid=A;&pkey=B;x_xhh_tokenid=B;
+```
+
+每个账号末尾的 `;` 建议保留，和抓包看到的形式一致。
+
