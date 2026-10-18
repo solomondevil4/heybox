@@ -1,0 +1,4 @@
+﻿node_modules/
+sign.log
+.env
+.data/

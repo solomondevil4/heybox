@@ -1,0 +1,119 @@
+name: heybox-daily
+
+# 每天 UTC 00:00 = 北京时间 08:00 自动签到
+# 也可在 Actions 页面点 Run workflow 手动跑
+on:
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+
+# 防止上一次还没跑完又叠加一次
+concurrency:
+  group: heybox-daily
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: write   # keepalive 需要：重新 enable 工作流来重置 60 天计数器
+  issues: write    # 可选：把日报写进 Issue 触发 GitHub 通知
+
+jobs:
+  sign:
+    name: 签到 + 每日分享任务
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: 安装依赖
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
+
+      # 没配 secret 时脚本会「成功」但什么都没做，这里直接拦下来
+      - name: 检查 Cookie 是否配置
+        env:
+          heybox_ck: ${{ secrets.HEYBOX_CK }}
+        run: |
+          if [ -z "$heybox_ck" ]; then
+            echo "::error::缺少 secret HEYBOX_CK，请到 Settings - Secrets and variables - Actions 添加"
+            exit 1
+          fi
+
+      # heybox_sign.js 同时完成：签到 / 分享任意帖子 / 分享游戏详情 / 分享游戏评价
+      # 并输出「当前总H币」和「任务汇总」
+      - name: 执行每日任务
+        id: attendance
+        env:
+          heybox_ck: ${{ secrets.HEYBOX_CK }}
+        run: |
+          set -o pipefail
+          node heybox_sign.js 2>&1 | tee sign.log
+
+      - name: 写入运行摘要
+        if: always()
+        run: |
+          {
+            echo "## 小黑盒每日任务"
+            echo ""
+            echo "| 项目 | 结果 |"
+            echo "| --- | --- |"
+            echo "| 触发方式 | \`${{ github.event_name }}\` |"
+            echo "| 执行时间 | $(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M:%S %Z') |"
+            echo "| 作业状态 | \`${{ job.status }}\` |"
+            echo ""
+            echo '```text'
+            cat sign.log 2>/dev/null || echo '无日志'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 上传日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sign-log-${{ github.run_id }}
+          path: sign.log
+          retention-days: 7
+          if-no-files-found: ignore
+
+      # 把每天的结果追加到一个固定 Issue，触发 GitHub 通知（邮件 / App 推送）
+      # 不想要这个功能：删掉本步骤 + 顶部 permissions 里的 issues: write
+      - name: 写入日报 Issue（触发通知）
+        if: always()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          STATUS: ${{ job.status }}
+        run: |
+          NUM=$(gh issue list --state open --search "小黑盒签到日报 in:title" \
+                --json number --jq '.[0].number // empty')
+          BODY=$(printf '**%s** · %s\n\n```text\n%s\n```' \
+            "$([ "$STATUS" = success ] && echo '全部完成' || echo '有任务未完成')" \
+            "$(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M')" \
+            "$(tail -n 25 sign.log 2>/dev/null || echo '无日志')")
+          if [ -n "$NUM" ]; then
+            gh issue comment "$NUM" --body "$BODY"
+          else
+            gh issue create --title "小黑盒签到日报" --body "$BODY"
+          fi
+
+  # 公开仓库的 60 天不活跃停用规则，靠这个 job 每天重置计数器
+  # 必须在 schedule 触发时执行，否则一旦被停用就再也跑不起来
+  keepalive:
+    name: 保活
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - uses: liskin/gh-workflow-keepalive@v1
